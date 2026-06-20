@@ -6,7 +6,7 @@ L'objectif de ce projet est de développer un bot Discord (Node.js / Discord.js)
 
 *Objectif : Être capable de créer un serveur à partir d'un fichier JSON local.*
 
-* [ ] **1.1 Initialisation du projet**
+* [x] **1.1 Initialisation du projet**
 * Setup de l'environnement Node.js (TypeScript recommandé ou ES Modules).
 * Installation des dépendances : `discord.js`, `dotenv`.
 * Configuration du bot sur le portail Developer de Discord (Intents requis : `Guilds`, `GuildMessages`).

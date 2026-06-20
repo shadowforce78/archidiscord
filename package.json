@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node ."
+    "start": "node .",
+    "dev": "nodemon ."
   },
   "keywords": [],
   "author": "TFAGaming",
@@ -15,6 +16,7 @@
     "discord.js": "^14.25.0",
     "discordjs-v14-bot-template": "file:",
     "dotenv": "^16.4.5",
+    "nodemon": "^3.1.14",
     "ollama": "^0.6.3",
     "quick-yaml.db": "^1.2.2"
   }
