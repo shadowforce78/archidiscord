@@ -39,6 +39,7 @@ const { PermissionFlagsBits } = require('./permissions');
 
 /**
  * @typedef {Object} RoleSchema
+ * @property {string} [id] - ID unique Discord du rôle (optionnel)
  * @property {string} name - Nom du rôle
  * @property {string} [color] - Couleur en hex (ex: "#FF5733") ou nom (ex: "RED")
  * @property {boolean} [hoist=false] - Affiché séparément dans la sidebar
@@ -49,6 +50,7 @@ const { PermissionFlagsBits } = require('./permissions');
 
 /**
  * @typedef {Object} CategorySchema
+ * @property {string} [id] - ID unique Discord de la catégorie (optionnel)
  * @property {string} name - Nom de la catégorie (ex: "📢 INFOS")
  * @property {OverwriteSchema[]} [permissionOverwrites] - Overwrites au niveau catégorie
  * @property {ChannelSchema[]} channels - Salons dans cette catégorie
@@ -56,6 +58,7 @@ const { PermissionFlagsBits } = require('./permissions');
 
 /**
  * @typedef {Object} ChannelSchema
+ * @property {string} [id] - ID unique Discord du salon (optionnel)
  * @property {string} name - Nom du salon (ex: "💬-général")
  * @property {string} [type="text"] - Type : text, voice, announcement, stage, forum, media
  * @property {string} [topic] - Sujet du salon (max 1024 chars)
@@ -127,18 +130,16 @@ function validateBlueprint(blueprint) {
             errors.push('Discord limite à 250 rôles maximum par serveur');
         }
 
-        const roleNames = new Set();
         for (const [i, role] of blueprint.roles.entries()) {
+            if (role.id !== undefined && typeof role.id !== 'string') {
+                errors.push(`roles[${i}].id doit être une string`);
+            }
             if (!role.name || typeof role.name !== 'string') {
                 errors.push(`roles[${i}].name est requis`);
             } else {
                 if (role.name.length > 100) {
                     errors.push(`roles[${i}].name : max 100 caractères`);
                 }
-                if (roleNames.has(role.name)) {
-                    errors.push(`roles[${i}] : nom en double "${role.name}"`);
-                }
-                roleNames.add(role.name);
             }
 
             if (role.permissions && Array.isArray(role.permissions)) {
@@ -173,6 +174,9 @@ function validateBlueprint(blueprint) {
         }
 
         for (const [i, cat] of blueprint.categories.entries()) {
+            if (cat.id !== undefined && typeof cat.id !== 'string') {
+                errors.push(`categories[${i}].id doit être une string`);
+            }
             if (!cat.name || typeof cat.name !== 'string') {
                 errors.push(`categories[${i}].name est requis`);
             }
@@ -207,6 +211,9 @@ function validateBlueprint(blueprint) {
  * @private
  */
 function _validateChannel(channel, path, errors) {
+    if (channel.id !== undefined && typeof channel.id !== 'string') {
+        errors.push(`${path}.id doit être une string`);
+    }
     if (!channel.name || typeof channel.name !== 'string') {
         errors.push(`${path}.name est requis`);
     } else if (channel.name.length > 100) {
