@@ -152,14 +152,16 @@ async function applyChannels(guild, channels, parentCategory, roleNameToId, proc
             if (chData.id) {
                 const found = guild.channels.cache.get(chData.id);
                 if (found) {
-                    if (found.type !== type) { report.skipped.push(`Channel "${chData.name}": type change not allowed.`); continue; }
-                    existingChannel = found;
+                    if (found.type !== type) { 
+                        report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
+                    } else {
+                        existingChannel = found;
+                    }
                 }
             }
             if (!existingChannel) {
                 existingChannel = guild.channels.cache.find(ch => {
-                    return ch.name === chData.name && ch.type === type &&
-                        (parentCategory ? ch.parentId === parentCategory.id : ch.parentId === null);
+                    return ch.name === chData.name && ch.type === type;
                 }) ?? null;
             }
 
@@ -231,15 +233,15 @@ function previewBlueprint(guild, blueprint, commandChannelId) {
                         const found = guild.channels.cache.get(chData.id);
                         if (found) {
                             if (found.type !== type) {
-                                report.skipped.push(`Channel "${chData.name}": type change not allowed.`);
-                                continue;
+                                report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
+                            } else {
+                                existingChannel = found;
                             }
-                            existingChannel = found;
                         }
                     }
                     if (!existingChannel) {
                         existingChannel = guild.channels.cache.find(ch => {
-                            return ch.name === chData.name && ch.type === type && (existingCat ? ch.parentId === existingCat.id : true);
+                            return ch.name === chData.name && ch.type === type;
                         });
                     }
                     
@@ -262,14 +264,14 @@ function previewBlueprint(guild, blueprint, commandChannelId) {
                 const found = guild.channels.cache.get(chData.id);
                 if (found) {
                     if (found.type !== type) {
-                        report.skipped.push(`Channel "${chData.name}": type change not allowed.`);
-                        continue;
+                        report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
+                    } else {
+                        existingChannel = found;
                     }
-                    existingChannel = found;
                 }
             }
             if (!existingChannel) {
-                existingChannel = guild.channels.cache.find(ch => ch.name === chData.name && ch.type === type && ch.parentId === null);
+                existingChannel = guild.channels.cache.find(ch => ch.name === chData.name && ch.type === type);
             }
             
             if (existingChannel) {
