@@ -1,7 +1,7 @@
 const { ChatInputCommandInteraction, AttachmentBuilder } = require("discord.js");
 const DiscordBot = require("../../client/DiscordBot");
 const ApplicationCommand = require("../../structure/ApplicationCommand");
-const { buildBlueprint, countChannels } = require("../../utils/blueprintBuilder");
+const { buildBlueprint, countChannels, stringifyToASCII } = require("../../utils/blueprintBuilder");
 const { validateBlueprint } = require("../../referentiel/blueprintSchema");
 const { PermissionFlagsBits } = require("../../referentiel/permissions");
 const { ChannelTypeAliases } = require("../../referentiel/channelTypes");
@@ -115,7 +115,7 @@ ${validPermissions}
 
             const userPrompt = `Voici le blueprint de serveur actuel :
 \`\`\`json
-${JSON.stringify(currentBlueprint, null, 2)}
+${stringifyToASCII(currentBlueprint)}
 \`\`\`
 
 Instruction de modification :
@@ -162,7 +162,7 @@ Modifie le blueprint selon cette instruction et retourne le JSON résultant.`;
             if (!validation.valid) {
                 console.warn('[ollama] Le blueprint généré est invalide :', validation.errors);
                 const invalidAttachment = new AttachmentBuilder(
-                    Buffer.from(JSON.stringify(updatedBlueprint, null, 2), 'utf-8'),
+                    Buffer.from(stringifyToASCII(updatedBlueprint), 'utf-8'),
                     { name: 'blueprint-invalide.json' }
                 );
                 return interaction.editReply({
@@ -176,7 +176,7 @@ Modifie le blueprint selon cette instruction et retourne le JSON résultant.`;
             }
 
             // 8. Succès ! Retourner le blueprint
-            const jsonString = JSON.stringify(updatedBlueprint, null, 2);
+            const jsonString = stringifyToASCII(updatedBlueprint);
             if (jsonString.length > 1900) {
                 const attachment = new AttachmentBuilder(
                     Buffer.from(jsonString, 'utf-8'),
@@ -264,17 +264,62 @@ function cleanObjectEncoding(obj) {
     return obj;
 }
 
+const WIN1252_TO_BYTE = {
+    0x20AC: 0x80, // €
+    0x201A: 0x82, // ‚
+    0x0192: 0x83, // ƒ
+    0x201E: 0x84, // „
+    0x2026: 0x85, // …
+    0x2020: 0x86, // †
+    0x2021: 0x87, // ‡
+    0x02C6: 0x88, // ˆ
+    0x2030: 0x89, // ‰
+    0x0160: 0x8A, // Š
+    0x2039: 0x8B, // ‹
+    0x0152: 0x8C, // Œ
+    0x017D: 0x8E, // Ž
+    0x2018: 0x91, // ‘
+    0x2019: 0x92, // ’
+    0x201C: 0x93, // “
+    0x201D: 0x94, // ”
+    0x2022: 0x95, // •
+    0x2013: 0x96, // –
+    0x2014: 0x97, // —
+    0x02DC: 0x98, // ˜
+    0x2122: 0x99, // ™
+    0x0161: 0x9A, // š
+    0x203A: 0x9B, // ›
+    0x0153: 0x9C, // œ
+    0x017E: 0x9E, // ž
+    0x0178: 0x9F, // Ÿ
+};
+
 /**
  * Tente de corriger une chaîne de caractères mal décodée en UTF-8 (double-encodage).
- * Si la chaîne est déjà correcte, elle est retournée inchangée.
+ * Si la chaîne est déjà correcte (ex: contient des émojis ou caractères spéciaux valides), elle est retournée inchangée.
  *
  * @param {string} str 
  * @returns {string}
  */
 function fixUtf8Encoding(str) {
     if (typeof str !== 'string') return str;
+
+    const bytes = [];
+    for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        if (WIN1252_TO_BYTE[code] !== undefined) {
+            bytes.push(WIN1252_TO_BYTE[code]);
+        } else if (code <= 255) {
+            bytes.push(code);
+        } else {
+            // Contient un caractère non Windows-1252 (ex: un vrai émoji ou symbole correct).
+            // On ne modifie pas cette chaîne pour éviter toute corruption.
+            return str;
+        }
+    }
+
     try {
-        const buf = Buffer.from(str, 'latin1');
+        const buf = Buffer.from(bytes);
         const decoded = buf.toString('utf-8');
         // Si le décodage produit une chaîne différente et ne contient pas de caractères de remplacement invalides ()
         if (decoded !== str && !decoded.includes('\uFFFD')) {

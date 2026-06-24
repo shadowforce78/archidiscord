@@ -1,7 +1,7 @@
 const { ChatInputCommandInteraction, AttachmentBuilder } = require("discord.js");
 const DiscordBot = require("../../client/DiscordBot");
 const ApplicationCommand = require("../../structure/ApplicationCommand");
-const { buildBlueprint, countChannels } = require("../../utils/blueprintBuilder");
+const { buildBlueprint, countChannels, stringifyToASCII } = require("../../utils/blueprintBuilder");
 
 module.exports = new ApplicationCommand({
     command: {
@@ -35,8 +35,8 @@ module.exports = new ApplicationCommand({
 
             const blueprint = buildBlueprint(guild);
 
-            // Sérialiser en JSON formaté
-            const jsonString = JSON.stringify(blueprint, null, 2);
+            // Sérialiser en JSON formaté ASCII sécurisé
+            const jsonString = stringifyToASCII(blueprint);
 
             // Si le JSON est trop long pour un message, on l'envoie en fichier
             if (jsonString.length > 1900) {

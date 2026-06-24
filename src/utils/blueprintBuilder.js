@@ -295,4 +295,21 @@ module.exports = {
     countChannels,
     CHANNEL_TYPE_TO_ALIAS,
     EXPORTABLE_CHANNEL_TYPES,
+    stringifyToASCII,
 };
+
+/**
+ * Sérialise un objet en JSON formaté en forçant l'échappement de tous les caractères
+ * non-ASCII (comme les accents et les émojis) en séquences \uXXXX.
+ * Cela protège l'intégrité du fichier contre les corruptions d'encodage sur Windows.
+ *
+ * @param {any} obj 
+ * @returns {string}
+ */
+function stringifyToASCII(obj) {
+    const raw = JSON.stringify(obj, null, 2);
+    if (!raw) return raw;
+    return raw.replace(/[\u007F-\uFFFF]/g, (chr) => {
+        return '\\u' + ('0000' + chr.charCodeAt(0).toString(16)).toUpperCase().slice(-4);
+    });
+}
