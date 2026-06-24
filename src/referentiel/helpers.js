@@ -192,7 +192,18 @@ function buildOverwrite(overwrite, roleNameToId, everyoneRoleId) {
     } else {
         id = roleNameToId.get(overwrite.target);
         if (!id) {
-            throw new Error(`Rôle introuvable pour l'overwrite : "${overwrite.target}". Vérifiez que ce rôle est défini dans le blueprint.`);
+            // Tentative de résolution insensible à la casse
+            const lowerTarget = overwrite.target.toLowerCase();
+            for (const [name, rId] of roleNameToId.entries()) {
+                if (name.toLowerCase() === lowerTarget) {
+                    id = rId;
+                    break;
+                }
+            }
+        }
+        
+        if (!id) {
+            throw new Error(`Rôle introuvable : "${overwrite.target}"`);
         }
         type = 0; // Role overwrite (par défaut dans le blueprint)
     }

@@ -1,7 +1,8 @@
-const { ChatInputCommandInteraction, AttachmentBuilder } = require("discord.js");
+const { ChatInputCommandInteraction, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require("discord.js");
 const DiscordBot = require("../../client/DiscordBot");
 const ApplicationCommand = require("../../structure/ApplicationCommand");
 const { buildBlueprint, countChannels, stringifyToASCII } = require("../../utils/blueprintBuilder");
+const { applyBlueprint, previewBlueprint, formatReport } = require("../../utils/serverBuilder");
 const { validateBlueprint } = require("../../referentiel/blueprintSchema");
 const { PermissionFlagsBits } = require("../../referentiel/permissions");
 const { ChannelTypeAliases } = require("../../referentiel/channelTypes");
@@ -175,23 +176,68 @@ Modifie le blueprint selon cette instruction et retourne le JSON résultant.`;
                 });
             }
 
-            // 8. Succès ! Retourner le blueprint
-            const jsonString = stringifyToASCII(updatedBlueprint);
-            if (jsonString.length > 1900) {
-                const attachment = new AttachmentBuilder(
-                    Buffer.from(jsonString, 'utf-8'),
-                    { name: `blueprint-modifie-${guild.name.replace(/[^a-zA-Z0-9]/g, '_')}.json` }
-                );
-                await interaction.editReply({
-                    content: `✅ **Blueprint mis à jour avec succès par Ollama** (${model}) !\n` +
-                        `— ${updatedBlueprint.roles?.length || 0} rôles, ${countChannels(updatedBlueprint)} salons, ${updatedBlueprint.categories?.length || 0} catégories.`,
-                    files: [attachment]
-                });
-            } else {
-                await interaction.editReply({
-                    content: `✅ **Blueprint mis à jour avec succès par Ollama** (${model}) :\n\`\`\`json\n${jsonString}\n\`\`\``
-                });
-            }
+            // 8. Succès ! Demander confirmation avec un aperçu des changements
+            const previewReport = previewBlueprint(guild, updatedBlueprint, interaction.channelId);
+            const previewText = formatReport(previewReport);
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('confirm_blueprint')
+                    .setLabel('Confirmer et appliquer')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId('cancel_blueprint')
+                    .setLabel('Annuler')
+                    .setStyle(ButtonStyle.Danger)
+            );
+
+            const message = await interaction.editReply({
+                content: `✅ **Blueprint généré par Ollama** (${model}) !\n\n` +
+                    `Voici l'aperçu des modifications qui seront apportées au serveur :\n` +
+                    `${previewText}\n\n` +
+                    `⚠️ **Attention** : L'application du blueprint va modifier l'architecture du serveur (suppression des anciens salons, création des nouveaux, etc.). Veuillez confirmer.`,
+                components: [row]
+            });
+
+            // 9. Attendre la confirmation
+            const collector = message.createMessageComponentCollector({
+                componentType: ComponentType.Button,
+                time: 60000 // 1 minute pour confirmer
+            });
+
+            collector.on('collect', async i => {
+                if (i.user.id !== interaction.user.id) {
+                    return i.reply({ content: "Vous ne pouvez pas utiliser ces boutons.", ephemeral: true });
+                }
+
+                if (i.customId === 'cancel_blueprint') {
+                    await i.update({ content: '❌ **Action annulée.** Le blueprint n\'a pas été appliqué.', components: [], files: [] });
+                    collector.stop('cancelled');
+                } else if (i.customId === 'confirm_blueprint') {
+                    await i.update({ content: '⚙️ **Application du blueprint en cours...** Cela peut prendre un moment.', components: [], files: [] });
+                    
+                    try {
+                        const report = await applyBlueprint(guild, updatedBlueprint, interaction.channelId);
+                        const reportText = formatReport(report);
+                        
+                        await interaction.editReply({
+                            content: `✅ **Blueprint appliqué avec succès !**\n\n${reportText}`
+                        });
+                    } catch (err) {
+                        console.error('[ollama] Erreur lors de l\'application :', err);
+                        await interaction.editReply({
+                            content: `❌ **Erreur lors de l'application du blueprint :** ${err.message}`
+                        });
+                    }
+                    collector.stop('applied');
+                }
+            });
+
+            collector.on('end', (collected, reason) => {
+                if (reason === 'time') {
+                    interaction.editReply({ content: '⏳ **Délai expiré.** Action annulée.', components: [] }).catch(() => {});
+                }
+            });
 
         } catch (err) {
             console.error('[ollama] Erreur :', err);
