@@ -1,9 +1,9 @@
 const { ChatInputCommandInteraction, AttachmentBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require("discord.js");
 const DiscordBot = require("../../client/DiscordBot");
 const ApplicationCommand = require("../../structure/ApplicationCommand");
-const { buildBlueprint, countChannels, stringifyToASCII } = require("../../utils/blueprintBuilder");
+const { buildBlueprint, stringifyToASCII } = require("../../utils/blueprintBuilder");
 const { applyBlueprint, previewBlueprint, formatReport } = require("../../utils/serverBuilder");
-const { validateBlueprint } = require("../../referentiel/blueprintSchema");
+const { validateDiffBlueprint } = require("../../referentiel/blueprintSchema");
 const { PermissionFlagsBits } = require("../../referentiel/permissions");
 const { ChannelTypeAliases } = require("../../referentiel/channelTypes");
 const ollama = require("ollama").default;
@@ -63,58 +63,59 @@ module.exports = new ApplicationCommand({
             ]);
             const currentBlueprint = cleanObjectEncoding(buildBlueprint(guild));
 
-            // 4. Construire le prompt système
-            const systemPrompt = `Tu es un assistant IA spécialisé dans la conception et la modification d'architectures de serveurs Discord.
-Tu reçois en entrée le blueprint actuel d'un serveur Discord sous forme de JSON, ainsi qu'une instruction de modification en langage naturel.
-Ton rôle est de générer le blueprint JSON final mis à jour selon l'instruction de l'utilisateur.
+            // 4. Construire le prompt systeme
+            const systemPrompt = `Tu es un assistant IA specialise dans la gestion des serveurs Discord.
+Tu recois l'etat actuel du serveur (JSON avec IDs) et une instruction de modification.
+Tu dois retourner un JSON de type "diff" qui decrit UNIQUEMENT les changements a appliquer.
 
-Voici les règles strictes de format et de validation à respecter :
+LE FORMAT DE REPONSE EST STRICTEMENT :
+{
+  "create": {
+    "roles": [],
+    "categories": [
+      {
+        "name": "NOM",
+        "channels": [ { "name": "salon", "type": "text" } ],
+        "moveChannels": [ { "id": "ID_SALON_EXISTANT", "name": "nom-salon" } ]
+      }
+    ],
+    "channels": [
+      { "name": "salon", "type": "text", "categoryId": "ID_DISCORD_REEL_DE_CATEGORIE_EXISTANTE" }
+    ]
+  },
+  "modify": {
+    "serverName": "Nouveau nom (si changement, sinon null)",
+    "description": "Nouvelle description (si changement, sinon null)",
+    "everyoneConfig": { "permissions": [] },
+    "roles": [ { "id": "ID_OBLIGATOIRE", "name": "...", "permissions": [], "color": "#RRGGBB" } ],
+    "categories": [ { "id": "ID_OBLIGATOIRE", "name": "...", "permissionOverwrites": [] } ],
+    "channels": [ { "id": "ID_OBLIGATOIRE", "name": "...", "type": "text", "categoryId": "ID_DISCORD_REEL" } ]
+  },
+  "delete": {
+    "roles": [ { "id": "...", "name": "..." } ],
+    "categories": [ { "id": "...", "name": "..." } ],
+    "channels": [ { "id": "...", "name": "..." } ]
+  },
+  "keep": {
+    "roles": [ { "id": "...", "name": "...", "permissions": [], "color": "..." } ],
+    "categories": [ { "id": "...", "name": "...", "channels": [] } ],
+    "channels": [ { "id": "...", "name": "...", "categoryId": "...", "permissionOverwrites": [] } ]
+  }
+}
 
-1. SCHEMA DU BLUEPRINT :
-Le JSON doit respecter la structure suivante :
-- "serverName": string (nom du serveur, 2-100 caractères)
-- "description": string (optionnel)
-- "roles": tableau d'objets rôle :
-  * "name": string (requis, unique)
-  * "color": string (optionnel, ex: "#FF5733")
-  * "hoist": boolean (optionnel, afficher séparément dans la sidebar)
-  * "mentionable": boolean (optionnel)
-  * "permissions": tableau de strings (noms de permissions)
-- "everyoneConfig": objet (optionnel) :
-  * "permissions": tableau de strings (permissions du rôle @everyone)
-- "categories": tableau d'objets catégorie :
-  * "name": string (requis)
-  * "permissionOverwrites": tableau d'objets overwrite (optionnel)
-  * "channels": tableau d'objets salon (requis)
-- "standaloneChannels": tableau d'objets salon hors catégorie (optionnel)
+REGLES CRITIQUES (a respecter absolument) :
+1. Tout element non liste dans delete sera conserve. MAIS tu DOIS lister dans "keep" chaque element conserve sans modification. C'est essentiel pour la traçabilite.
+2. Ne mets JAMAIS dans "delete" un element que tu veux conserver.
+3. Utilise TOUJOURS les IDs Discord fournis dans l'etat actuel. Ne les invente JAMAIS. Un ID Discord est un nombre de 17 a 20 chiffres (ex: "1234567890123456789").
+4. Pour creer un salon dans une categorie EXISTANTE : utilise create.channels avec "categoryId" = l'ID Discord reel de cette categorie (copie depuis l'etat actuel).
+5. Pour creer un salon dans une NOUVELLE categorie : inclus le salon dans create.categories[].channels.
+6. Pour DEPLACER des salons EXISTANTS dans une NOUVELLE categorie que tu crees : utilise create.categories[].moveChannels avec les IDs reels des salons existants. NE PAS utiliser modify.channels avec un categoryId invente.
+7. Ne cree pas de doublons : si un element existe deja, utilise modify, pas create.
+8. Les types de salons autorises : ${validChannelTypes}
+9. Les permissions autorisees (sensibles a la casse) : ${validPermissions}
+10. Retourne UNIQUEMENT le JSON, sans texte avant ou apres.`;
 
-Chaque objet salon ("channels" ou "standaloneChannels") :
-- "name": string (requis, ex: "salon-de-test")
-- "type": string (optionnel, défaut "text"). Valeurs autorisées : ${validChannelTypes}
-- "topic": string (optionnel, sujet du salon)
-- "nsfw": boolean (optionnel)
-- "rateLimitPerUser": nombre en secondes (optionnel, 0 à 21600)
-- "bitrate": nombre (optionnel, 8000 à 384000, pour salons vocaux/stage)
-- "userLimit": nombre (optionnel, 0 à 99, pour salons vocaux/stage)
-- "permissionOverwrites": tableau d'objets overwrite (optionnel)
-
-Chaque objet overwrite ("permissionOverwrites") :
-- "target": string (nom du rôle ciblé ou "@everyone")
-- "allow": tableau de strings (permissions autorisées)
-- "deny": tableau de strings (permissions refusées)
-
-2. PERMISSIONS AUTORISÉES (sensible à la casse, utilise uniquement ces noms exacts) :
-${validPermissions}
-
-3. INSTRUCTIONS IMPORTANTES :
-- Ne crée pas de nouvelles permissions. Utilise exclusivement celles listées ci-dessus.
-- Ne crée pas de rôles en doublon (le nom des rôles doit être unique).
-- Ne crée pas de types de salons non autorisés.
-- Ne modifie que ce qui est demandé dans l'instruction de l'utilisateur, tout en conservant le reste de la structure existante.
-- Retourne UNIQUEMENT le code JSON mis à jour dans le format demandé.
-- Ne rajoute pas d'explication textuelle avant ou après le JSON.`;
-
-            const userPrompt = `Voici le blueprint de serveur actuel :
+            const userPrompt = `Voici l'etat actuel du serveur Discord :
 \`\`\`json
 ${stringifyToASCII(currentBlueprint)}
 \`\`\`
@@ -122,7 +123,7 @@ ${stringifyToASCII(currentBlueprint)}
 Instruction de modification :
 ${instruction}
 
-Modifie le blueprint selon cette instruction et retourne le JSON résultant.`;
+Retourne le diff JSON decrivant uniquement les changements a appliquer.`;
 
             // 5. Appeler Ollama
             await interaction.editReply({ content: `🤖 **Ollama** (${model}) est en train de réfléchir...` });
@@ -158,26 +159,25 @@ Modifie le blueprint selon cette instruction et retourne le JSON résultant.`;
                 });
             }
 
-            // 7. Validation du Blueprint
-            const validation = validateBlueprint(updatedBlueprint);
+            // 7. Validation du Diff Blueprint
+            const validation = validateDiffBlueprint(updatedBlueprint);
             if (!validation.valid) {
-                console.warn('[ollama] Le blueprint généré est invalide :', validation.errors);
+                console.warn('[ollama] Le diff genere est invalide :', validation.errors);
                 const invalidAttachment = new AttachmentBuilder(
                     Buffer.from(stringifyToASCII(updatedBlueprint), 'utf-8'),
-                    { name: 'blueprint-invalide.json' }
+                    { name: 'diff-invalide.json' }
                 );
                 return interaction.editReply({
-                    content: `⚠️ **Blueprint généré mais invalide technique** :\n` +
-                        `L'IA a généré un blueprint contenant des erreurs de validation :\n` +
+                    content: `⚠️ **Diff genere mais invalide** :\n` +
                         validation.errors.map(err => `- \`${err}\``).slice(0, 10).join('\n') +
                         (validation.errors.length > 10 ? `\n*... et ${validation.errors.length - 10} autres erreurs.*` : '') +
-                        `\n\nVous trouverez le blueprint erroné en pièce jointe pour débogage.`,
+                        `\n\nLe diff errone est en piece jointe pour debogage.`,
                     files: [invalidAttachment]
                 });
             }
 
-            // 8. Succès ! Demander confirmation avec un aperçu des changements
-            const previewReport = previewBlueprint(guild, updatedBlueprint, interaction.channelId);
+            // 8. Succes ! Apercu des changements
+            const previewReport = previewBlueprint(updatedBlueprint, interaction.channelId);
             const previewText = formatReport(previewReport);
 
             const row = new ActionRowBuilder().addComponents(

@@ -1,15 +1,13 @@
 /**
- * ═══════════════════════════════════════════════════════════════════
- *  SERVER BUILDER - UTILITAIRE
- *  Applique un Blueprint JSON à un serveur Discord via l'API discord.js
- *  Dernière MAJ : Juin 2026
- * ═══════════════════════════════════════════════════════════════════
+ * SERVER BUILDER - UTILITAIRE (Diff-Based)
+ * Applique un DiffBlueprint JSON a un serveur Discord via discord.js
+ * Derniere MAJ : Juin 2026
  *
- *  Logique d'application :
- *  1. Rôles : crée les manquants, met à jour les existants (par ID ou nom)
- *  2. everyoneConfig : met à jour les permissions du rôle @everyone
- *  3. Catégories : crée les manquantes, met à jour les existantes (par ID)
- *  4. Salons : crée les manquants, met à jour les existants (par ID)
+ * Le builder execute exactement les 4 blocs du diff :
+ *   create  -> cree les elements
+ *   modify  -> modifie les elements (par id)
+ *   delete  -> supprime les elements (par id)
+ *   keep    -> aucune action (elements conserves)
  */
 
 const { ChannelType } = require('discord.js');
@@ -27,6 +25,14 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function newReport() {
+    return { created: [], updated: [], skipped: [], deleted: [], errors: [] };
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  HELPERS INTERNES
+// ─────────────────────────────────────────────────────────────────
+
 function resolveOverwrites(overwrites, roleNameToId, everyoneId, report, contextName) {
     if (!Array.isArray(overwrites) || overwrites.length === 0) return [];
     const result = [];
@@ -40,345 +46,406 @@ function resolveOverwrites(overwrites, roleNameToId, everyoneId, report, context
     return result;
 }
 
-function newReport() {
-    return { created: [], updated: [], skipped: [], deleted: [], errors: [] };
-}
+/**
+ * Resout un categoryId fourni par le LLM en ID Discord valide.
+ * Gere les cas ou le LLM invente un placeholder (ex: "ID_CATEGORIE_COMMUNAUTE")
+ * en cherchant par nom dans les categories nouvellement creees.
+ *
+ * @param {string|null} categoryId
+ * @param {import('discord.js').Guild} guild
+ * @param {Map<string, import('discord.js').GuildChannel>} newCategoryMap - name -> channel
+ * @returns {string|null|undefined} ID Discord, null (pas de categorie) ou undefined (ne pas toucher)
+ */
+function resolveCategoryId(categoryId, guild, newCategoryMap) {
+    if (categoryId === null || categoryId === undefined) return undefined;
+    if (categoryId === '') return null; // deplacer hors categorie
 
-async function applyRoles(guild, roles, report) {
-    const roleNameToId = new Map();
-    roleNameToId.set('@everyone', guild.id);
-    if (!Array.isArray(roles) || roles.length === 0) return roleNameToId;
+    // Snowflake valide = uniquement des chiffres, 17-20 caracteres
+    if (/^\d{17,20}$/.test(categoryId)) {
+        return categoryId; // ID Discord reel, Discord API validera
+    }
 
-    for (const roleData of roles) {
-        try {
-            const permissions = permissionNamesToBigInt(roleData.permissions || []);
-            const color = resolveColor(roleData.color);
+    // L'IA a invente un placeholder : chercher par nom dans les nouvelles categories
+    const byName = newCategoryMap.get(categoryId);
+    if (byName) return byName.id;
 
-            let existingRole = null;
-            if (roleData.id) existingRole = guild.roles.cache.get(roleData.id) ?? null;
-            if (!existingRole) existingRole = guild.roles.cache.find(r => r.name === roleData.name) ?? null;
-
-            if (existingRole) {
-                await existingRole.edit({ name: roleData.name, color, hoist: roleData.hoist ?? false, mentionable: roleData.mentionable ?? false, permissions });
-                roleNameToId.set(roleData.name, existingRole.id);
-                report.updated.push(`Role: ${roleData.name}`);
-            } else {
-                const created = await guild.roles.create({ name: roleData.name, color, hoist: roleData.hoist ?? false, mentionable: roleData.mentionable ?? false, permissions, reason: 'Blueprint Ollama' });
-                roleNameToId.set(roleData.name, created.id);
-                report.created.push(`Role: ${roleData.name}`);
-            }
-            await sleep(OP_DELAY_MS);
-        } catch (err) {
-            report.errors.push(`Role "${roleData.name}": ${err.message}`);
+    // Tentative de matching partiel (ex: "ID_CATEGORIE_COMMUNAUTE" -> "Communaute")
+    const lowerSearch = categoryId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    for (const [name, cat] of newCategoryMap.entries()) {
+        const lowerName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (lowerSearch.includes(lowerName) || lowerName.includes(lowerSearch)) {
+            return cat.id;
         }
     }
-    return roleNameToId;
+
+    return undefined; // Non resolu - ne pas modifier le parent
 }
 
-async function applyEveryoneConfig(guild, everyoneConfig, report) {
-    if (!everyoneConfig || !everyoneConfig.permissions) return;
-    try {
-        const permissions = permissionNamesToBigInt(everyoneConfig.permissions);
-        await guild.roles.everyone.edit({ permissions });
-        report.updated.push('Role: @everyone (permissions)');
-        await sleep(OP_DELAY_MS);
-    } catch (err) {
-        report.errors.push(`@everyone: ${err.message}`);
+async function _createChannel(guild, chData, parentCat, roleNameToId, report) {
+    const type = resolveChannelType(chData.type);
+    const metadata = ChannelTypeMetadata[type] || {};
+    const overwrites = resolveOverwrites(chData.permissionOverwrites, roleNameToId, guild.id, report, `Salon ${chData.name}`);
+
+    const opts = {
+        name: chData.name,
+        type,
+        parent: parentCat ?? null,
+        permissionOverwrites: overwrites,
+        reason: 'Blueprint Diff - create',
+    };
+
+    if (metadata.supportsTopic && chData.topic !== undefined) opts.topic = chData.topic;
+    if (metadata.supportsNSFW && chData.nsfw !== undefined) opts.nsfw = chData.nsfw;
+    if (metadata.supportsSlowmode && chData.rateLimitPerUser !== undefined) opts.rateLimitPerUser = chData.rateLimitPerUser;
+    if (type === ChannelType.GuildVoice || type === ChannelType.GuildStageVoice) {
+        if (chData.bitrate) opts.bitrate = chData.bitrate;
+        if (chData.userLimit !== undefined) opts.userLimit = chData.userLimit;
     }
+
+    await guild.channels.create(opts);
+    report.created.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
+    await sleep(OP_DELAY_MS);
 }
 
-async function applyCategories(guild, categories, roleNameToId, processedChannelIds, report) {
-    const categoryMap = new Map();
-    if (!Array.isArray(categories) || categories.length === 0) return categoryMap;
+// ─────────────────────────────────────────────────────────────────
+//  PREVIEW (synchrone - aucune action Discord)
+// ─────────────────────────────────────────────────────────────────
 
-    for (let i = 0; i < categories.length; i++) {
-        const catData = categories[i];
-        try {
-            const overwrites = resolveOverwrites(catData.permissionOverwrites, roleNameToId, guild.id, report, `Categorie ${catData.name}`);
-            let existingCat = null;
-            if (catData.id) {
-                const found = guild.channels.cache.get(catData.id);
-                if (found && found.type === ChannelType.GuildCategory) existingCat = found;
-            }
-            if (!existingCat) existingCat = guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === catData.name) ?? null;
-
-            let discordCat;
-            if (existingCat) {
-                await existingCat.edit({ name: catData.name, position: i, permissionOverwrites: overwrites });
-                discordCat = existingCat;
-                processedChannelIds.add(discordCat.id);
-                report.updated.push(`Category: ${catData.name}`);
-            } else {
-                discordCat = await guild.channels.create({ name: catData.name, type: ChannelType.GuildCategory, position: i, permissionOverwrites: overwrites, reason: 'Blueprint Ollama' });
-                processedChannelIds.add(discordCat.id);
-                report.created.push(`Category: ${catData.name}`);
-            }
-            if (catData.id) categoryMap.set(catData.id, discordCat);
-            categoryMap.set(catData.name, discordCat);
-            await sleep(OP_DELAY_MS);
-        } catch (err) {
-            report.errors.push(`Category "${catData.name}": ${err.message}`);
-        }
-    }
-    return categoryMap;
-}
-
-async function applyChannels(guild, channels, parentCategory, roleNameToId, processedChannelIds, report) {
-    if (!Array.isArray(channels) || channels.length === 0) return;
-
-    for (let i = 0; i < channels.length; i++) {
-        const chData = channels[i];
-        try {
-            const type = resolveChannelType(chData.type);
-            const overwrites = resolveOverwrites(chData.permissionOverwrites, roleNameToId, guild.id, report, `Salon ${chData.name}`);
-            const metadata = ChannelTypeMetadata[type] || {};
-            
-            const channelOptions = {
-                name: chData.name, type,
-                parent: parentCategory ?? null,
-                position: i,
-                permissionOverwrites: overwrites,
-            };
-
-            if (metadata.supportsTopic && chData.topic !== undefined) channelOptions.topic = chData.topic;
-            if (metadata.supportsNSFW && chData.nsfw !== undefined) channelOptions.nsfw = chData.nsfw;
-            if (metadata.supportsSlowmode && chData.rateLimitPerUser !== undefined) channelOptions.rateLimitPerUser = chData.rateLimitPerUser;
-            if (type === ChannelType.GuildVoice || type === ChannelType.GuildStageVoice) {
-                if (chData.bitrate) channelOptions.bitrate = chData.bitrate;
-                if (chData.userLimit !== undefined) channelOptions.userLimit = chData.userLimit;
-            }
-
-            let existingChannel = null;
-            if (chData.id) {
-                const found = guild.channels.cache.get(chData.id);
-                if (found) {
-                    if (found.type !== type) { 
-                        report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
-                    } else {
-                        existingChannel = found;
-                    }
-                }
-            }
-            if (!existingChannel) {
-                existingChannel = guild.channels.cache.find(ch => {
-                    return ch.name === chData.name && ch.type === type;
-                }) ?? null;
-            }
-
-            if (existingChannel) {
-                await existingChannel.edit(channelOptions);
-                processedChannelIds.add(existingChannel.id);
-                report.updated.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-            } else {
-                const created = await guild.channels.create({ ...channelOptions, reason: 'Blueprint Ollama' });
-                processedChannelIds.add(created.id);
-                report.created.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-            }
-            await sleep(OP_DELAY_MS);
-        } catch (err) {
-            report.errors.push(`Channel "${chData.name}": ${err.message}`);
-        }
-    }
-}
-
-function previewBlueprint(guild, blueprint, commandChannelId) {
+/**
+ * Genere un rapport de previsualisation a partir du diff, sans toucher au serveur.
+ *
+ * @param {Object} diff - Le DiffBlueprint
+ * @param {string} commandChannelId - ID du salon de la commande (protege)
+ * @returns {Object} report
+ */
+function previewBlueprint(diff, commandChannelId) {
     const report = newReport();
-    
-    // Roles
-    const processedRoleIds = new Set();
-    processedRoleIds.add(guild.id);
-    if (Array.isArray(blueprint.roles)) {
-        for (const roleData of blueprint.roles) {
-            let existingRole = null;
-            if (roleData.id) existingRole = guild.roles.cache.get(roleData.id);
-            if (!existingRole) existingRole = guild.roles.cache.find(r => r.name === roleData.name);
-            
-            if (existingRole) {
-                processedRoleIds.add(existingRole.id);
-                report.updated.push(`Role: ${roleData.name}`);
-            } else {
-                report.created.push(`Role: ${roleData.name}`);
-            }
-        }
+
+    // ── Creations ──────────────────────────────────────────────
+    for (const role of diff.create?.roles || [])
+        report.created.push(`Role: ${role.name}`);
+    for (const cat of diff.create?.categories || []) {
+        report.created.push(`Category: ${cat.name}`);
+        for (const ch of cat.channels || [])
+            report.created.push(`  + Channel: ${ch.name} (${ch.type || 'text'})`);
     }
-    
-    // @everyone
-    if (blueprint.everyoneConfig) {
+    for (const ch of diff.create?.channels || [])
+        report.created.push(`Channel: ${ch.name} (${ch.type || 'text'})`);
+
+    // ── Modifications ──────────────────────────────────────────
+    if (diff.modify?.serverName)
+        report.updated.push(`Serveur -> "${diff.modify.serverName}"`);
+    if (diff.modify?.everyoneConfig)
         report.updated.push('Role: @everyone (permissions)');
-    }
-    
-    // Categories & Channels
-    const processedChannelIds = new Set();
-    if (Array.isArray(blueprint.categories)) {
-        for (const catData of blueprint.categories) {
-            let existingCat = null;
-            if (catData.id) {
-                const found = guild.channels.cache.get(catData.id);
-                if (found && found.type === ChannelType.GuildCategory) existingCat = found;
-            }
-            if (!existingCat) existingCat = guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === catData.name);
-            
-            if (existingCat) {
-                processedChannelIds.add(existingCat.id);
-                report.updated.push(`Category: ${catData.name}`);
-            } else {
-                report.created.push(`Category: ${catData.name}`);
-            }
-            
-            if (Array.isArray(catData.channels)) {
-                for (const chData of catData.channels) {
-                    const type = resolveChannelType(chData.type);
-                    let existingChannel = null;
-                    if (chData.id) {
-                        const found = guild.channels.cache.get(chData.id);
-                        if (found) {
-                            if (found.type !== type) {
-                                report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
-                            } else {
-                                existingChannel = found;
-                            }
-                        }
-                    }
-                    if (!existingChannel) {
-                        existingChannel = guild.channels.cache.find(ch => {
-                            return ch.name === chData.name && ch.type === type;
-                        });
-                    }
-                    
-                    if (existingChannel) {
-                        processedChannelIds.add(existingChannel.id);
-                        report.updated.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-                    } else {
-                        report.created.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-                    }
-                }
-            }
-        }
-    }
-    
-    if (Array.isArray(blueprint.standaloneChannels)) {
-        for (const chData of blueprint.standaloneChannels) {
-            const type = resolveChannelType(chData.type);
-            let existingChannel = null;
-            if (chData.id) {
-                const found = guild.channels.cache.get(chData.id);
-                if (found) {
-                    if (found.type !== type) {
-                        report.skipped.push(`Channel "${chData.name}" sera recrée (changement de type).`);
-                    } else {
-                        existingChannel = found;
-                    }
-                }
-            }
-            if (!existingChannel) {
-                existingChannel = guild.channels.cache.find(ch => ch.name === chData.name && ch.type === type);
-            }
-            
-            if (existingChannel) {
-                processedChannelIds.add(existingChannel.id);
-                report.updated.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-            } else {
-                report.created.push(`Channel: ${chData.name} (${chData.type || 'text'})`);
-            }
-        }
-    }
-    
-    if (blueprint.serverName && blueprint.serverName !== guild.name) {
-        report.updated.push('Parametres du serveur (Nom)');
-    }
-    
-    const channelsToDelete = guild.channels.cache.filter(ch => !processedChannelIds.has(ch.id));
-    for (const [id, ch] of channelsToDelete) {
-        if (id === commandChannelId) {
-            report.skipped.push(`Salon de commande "${ch.name}" conserve pour eviter le crash. A supprimer manuellement.`);
+    for (const role of diff.modify?.roles || [])
+        report.updated.push(`Role: ${role.name}`);
+    for (const cat of diff.modify?.categories || [])
+        report.updated.push(`Category: ${cat.name || cat.id}`);
+    for (const ch of diff.modify?.channels || [])
+        report.updated.push(`Channel: ${ch.name}`);
+
+    // ── Suppressions ───────────────────────────────────────────
+    for (const role of diff.delete?.roles || [])
+        report.deleted.push(`Role: ${role.name}`);
+    for (const cat of diff.delete?.categories || [])
+        report.deleted.push(`Category: ${cat.name}`);
+    for (const ch of diff.delete?.channels || []) {
+        if (ch.id === commandChannelId) {
+            report.skipped.push(`Salon "${ch.name}" conserve (salon de commande, a supprimer manuellement)`);
         } else {
             report.deleted.push(`Channel: ${ch.name}`);
         }
     }
-    
-    const rolesToDelete = guild.roles.cache.filter(r => !processedRoleIds.has(r.id) && !r.managed && r.id !== guild.id);
-    for (const [id, r] of rolesToDelete) {
-        report.deleted.push(`Role: ${r.name}`);
-    }
-    
+
+    // ── Conserves (informatif) ─────────────────────────────────
+    const keptCount =
+        (diff.keep?.roles?.length || 0) +
+        (diff.keep?.categories?.length || 0) +
+        (diff.keep?.channels?.length || 0);
+    if (keptCount > 0)
+        report.skipped.push(`${keptCount} element(s) conserves sans modification`);
+
     return report;
 }
 
-async function applyBlueprint(guild, blueprint, commandChannelId, onProgress) {
+// ─────────────────────────────────────────────────────────────────
+//  APPLICATION (asynchrone - modifie le serveur Discord)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Applique un DiffBlueprint sur le serveur Discord.
+ *
+ * @param {import('discord.js').Guild} guild
+ * @param {Object} diff - Le DiffBlueprint valide
+ * @param {string} commandChannelId - ID du salon a proteger de la suppression
+ * @param {Function} [onProgress] - Callback de progression
+ * @returns {Object} report
+ */
+async function applyBlueprint(guild, diff, commandChannelId, onProgress) {
     const report = newReport();
     const notif = async (msg) => {
         console.log(`[serverBuilder] ${msg}`);
-        if (typeof onProgress === 'function') { try { await onProgress(msg); } catch (_e) {} }
+        if (typeof onProgress === 'function') { try { await onProgress(msg); } catch (_e) { } }
     };
 
     await Promise.all([guild.roles.fetch(), guild.channels.fetch()]);
 
-    await notif('Phase 0/5 - Configuration du serveur...');
+    // Construire roleNameToId depuis tous les roles existants (pour resoudre les overwrites)
+    const roleNameToId = new Map();
+    roleNameToId.set('@everyone', guild.id);
+    guild.roles.cache.forEach(r => {
+        if (r.id !== guild.id) roleNameToId.set(r.name, r.id);
+    });
+
+    // ── Phase 0 : Parametres du serveur ───────────────────────
+    await notif('Phase 0 - Configuration du serveur...');
     const editOptions = {};
-    if (blueprint.serverName && blueprint.serverName !== guild.name) editOptions.name = blueprint.serverName;
-    if (blueprint.description !== undefined && blueprint.description !== guild.description) editOptions.description = blueprint.description;
-    
+    if (diff.modify?.serverName && diff.modify.serverName !== guild.name)
+        editOptions.name = diff.modify.serverName;
+    if (diff.modify?.description !== undefined && diff.modify.description !== null && diff.modify.description !== guild.description)
+        editOptions.description = diff.modify.description;
+
     if (Object.keys(editOptions).length > 0) {
         try {
             await guild.edit(editOptions);
-            report.updated.push('Parametres du serveur');
+            report.updated.push(`Serveur: ${diff.modify.serverName || guild.name}`);
             await sleep(OP_DELAY_MS);
         } catch (err) {
-            report.errors.push(`Parametres du serveur: ${err.message}`);
+            report.errors.push(`Parametres serveur: ${err.message}`);
         }
     }
 
-    await notif('Phase 1/5 - Roles...');
-    const roleNameToId = await applyRoles(guild, blueprint.roles, report);
-
-    await notif('Phase 2/5 - @everyone...');
-    if (blueprint.everyoneConfig) await applyEveryoneConfig(guild, blueprint.everyoneConfig, report);
-
-    const processedChannelIds = new Set();
-
-    await notif('Phase 3/5 - Categories...');
-    const categoryMap = await applyCategories(guild, blueprint.categories, roleNameToId, processedChannelIds, report);
-
-    await notif('Phase 4/5 - Channels...');
-    if (Array.isArray(blueprint.categories)) {
-        for (const catData of blueprint.categories) {
-            const discordCat = categoryMap.get(catData.id) ?? categoryMap.get(catData.name) ?? null;
-            if (!discordCat) { report.errors.push(`Category "${catData.name}" not found for channels.`); continue; }
-            await applyChannels(guild, catData.channels, discordCat, roleNameToId, processedChannelIds, report);
+    // ── Phase 1 : Creer les roles ──────────────────────────────
+    await notif('Phase 1 - Creation des roles...');
+    for (const roleData of diff.create?.roles || []) {
+        try {
+            const permissions = permissionNamesToBigInt(roleData.permissions || []);
+            const color = resolveColor(roleData.color);
+            const created = await guild.roles.create({
+                name: roleData.name, color,
+                hoist: roleData.hoist ?? false,
+                mentionable: roleData.mentionable ?? false,
+                permissions,
+                reason: 'Blueprint Diff - create',
+            });
+            roleNameToId.set(roleData.name, created.id);
+            report.created.push(`Role: ${roleData.name}`);
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`Creation role "${roleData.name}": ${err.message}`);
         }
     }
-    if (Array.isArray(blueprint.standaloneChannels)) {
-        await applyChannels(guild, blueprint.standaloneChannels, null, roleNameToId, processedChannelIds, report);
+
+    // ── Phase 2 : Modifier les roles ───────────────────────────
+    await notif('Phase 2 - Modification des roles...');
+    for (const roleData of diff.modify?.roles || []) {
+        try {
+            const existing = guild.roles.cache.get(roleData.id);
+            if (!existing) { report.errors.push(`Role introuvable (id: ${roleData.id})`); continue; }
+            const permissions = permissionNamesToBigInt(roleData.permissions || []);
+            const color = resolveColor(roleData.color);
+            await existing.edit({
+                name: roleData.name, color,
+                hoist: roleData.hoist ?? false,
+                mentionable: roleData.mentionable ?? false,
+                permissions,
+            });
+            // Mettre a jour la map si le nom a change
+            roleNameToId.delete(existing.name);
+            roleNameToId.set(roleData.name, existing.id);
+            report.updated.push(`Role: ${roleData.name}`);
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`Modification role "${roleData.name}": ${err.message}`);
+        }
     }
 
-    await notif('Phase 5/5 - Nettoyage...');
-    
-    // Delete unused channels
-    const channelsToDelete = guild.channels.cache.filter(ch => !processedChannelIds.has(ch.id));
-    for (const [id, ch] of channelsToDelete) {
-        if (id === commandChannelId) {
-            report.skipped.push(`Salon de commande "${ch.name}" conserve pour eviter le crash. A supprimer manuellement.`);
+    // ── Phase 3 : Modifier @everyone ───────────────────────────
+    if (diff.modify?.everyoneConfig?.permissions) {
+        try {
+            const permissions = permissionNamesToBigInt(diff.modify.everyoneConfig.permissions);
+            await guild.roles.everyone.edit({ permissions });
+            report.updated.push('Role: @everyone (permissions)');
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`@everyone: ${err.message}`);
+        }
+    }
+
+    // ── Phase 4 : Supprimer les roles ──────────────────────────
+    await notif('Phase 4 - Suppression des roles...');
+    for (const roleRef of diff.delete?.roles || []) {
+        try {
+            const existing = roleRef.id
+                ? guild.roles.cache.get(roleRef.id)
+                : guild.roles.cache.find(r => r.name === roleRef.name);
+            if (!existing) { report.skipped.push(`Role a supprimer introuvable: "${roleRef.name}"`); continue; }
+            if (existing.managed) { report.skipped.push(`Role gere (bot), non supprime: "${existing.name}"`); continue; }
+            await existing.delete('Blueprint Diff - delete');
+            roleNameToId.delete(existing.name);
+            report.deleted.push(`Role: ${existing.name}`);
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`Suppression role "${roleRef.name}": ${err.message}`);
+        }
+    }
+
+    // ── Phase 5 : Creer les categories (et leurs salons) ──────
+    await notif('Phase 5 - Creation des categories...');
+    const newCategoryMap = new Map(); // name -> GuildChannel (pour ref dans create.channels)
+    for (const catData of diff.create?.categories || []) {
+        try {
+            const overwrites = resolveOverwrites(catData.permissionOverwrites, roleNameToId, guild.id, report, `Category ${catData.name}`);
+            const discordCat = await guild.channels.create({
+                name: catData.name,
+                type: ChannelType.GuildCategory,
+                permissionOverwrites: overwrites,
+                reason: 'Blueprint Diff - create',
+            });
+            newCategoryMap.set(catData.name, discordCat);
+            report.created.push(`Category: ${catData.name}`);
+            await sleep(OP_DELAY_MS);
+
+            // Creer les salons a l'interieur de cette nouvelle categorie
+            for (const chData of catData.channels || []) {
+                try {
+                    await _createChannel(guild, chData, discordCat, roleNameToId, report);
+                } catch (err) {
+                    report.errors.push(`Creation salon "${chData.name}" dans "${catData.name}": ${err.message}`);
+                }
+            }
+
+            // Deplacer des salons EXISTANTS dans cette nouvelle categorie
+            for (const chRef of catData.moveChannels || []) {
+                try {
+                    const existing = chRef.id
+                        ? guild.channels.cache.get(chRef.id)
+                        : guild.channels.cache.find(ch => ch.name === chRef.name);
+                    if (!existing) { report.skipped.push(`Salon a deplacer introuvable: "${chRef.name}"`); continue; }
+                    await existing.edit({ parent: discordCat.id }, 'Blueprint Diff - move to new category');
+                    report.updated.push(`Channel: ${existing.name} (deplace dans ${catData.name})`);
+                    await sleep(OP_DELAY_MS);
+                } catch (err) {
+                    report.errors.push(`Deplacement salon "${chRef.name}": ${err.message}`);
+                }
+            }
+        } catch (err) {
+            report.errors.push(`Creation category "${catData.name}": ${err.message}`);
+        }
+    }
+
+    // ── Phase 6 : Modifier les categories existantes ───────────
+    await notif('Phase 6 - Modification des categories...');
+    for (const catData of diff.modify?.categories || []) {
+        try {
+            const existing = guild.channels.cache.get(catData.id);
+            if (!existing) { report.errors.push(`Categorie introuvable (id: ${catData.id})`); continue; }
+            const overwrites = resolveOverwrites(catData.permissionOverwrites, roleNameToId, guild.id, report, `Category ${catData.name || catData.id}`);
+            await existing.edit({ name: catData.name ?? existing.name, permissionOverwrites: overwrites });
+            report.updated.push(`Category: ${catData.name || catData.id}`);
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`Modification category "${catData.id}": ${err.message}`);
+        }
+    }
+
+    // ── Phase 7 : Creer les salons dans des categories existantes
+    await notif('Phase 7 - Creation des salons...');
+    for (const chData of diff.create?.channels || []) {
+        try {
+            let parentCat = null;
+            if (chData.categoryId) {
+                const resolvedId = resolveCategoryId(chData.categoryId, guild, newCategoryMap);
+                if (resolvedId) {
+                    parentCat = guild.channels.cache.get(resolvedId) ?? null;
+                } else if (resolvedId === undefined) {
+                    report.skipped.push(`Salon "${chData.name}": categoryId "${chData.categoryId}" non resolu, cree sans categorie`);
+                }
+            }
+            await _createChannel(guild, chData, parentCat, roleNameToId, report);
+        } catch (err) {
+            report.errors.push(`Creation salon "${chData.name}": ${err.message}`);
+        }
+    }
+
+    // ── Phase 8 : Modifier les salons existants ────────────────
+    await notif('Phase 8 - Modification des salons...');
+    for (const chData of diff.modify?.channels || []) {
+        try {
+            const existing = guild.channels.cache.get(chData.id);
+            if (!existing) { report.errors.push(`Salon introuvable (id: ${chData.id})`); continue; }
+
+            const type = resolveChannelType(chData.type || 'text');
+            const metadata = ChannelTypeMetadata[type] || {};
+            const overwrites = resolveOverwrites(chData.permissionOverwrites, roleNameToId, guild.id, report, `Salon ${chData.name}`);
+
+            const opts = {
+                name: chData.name ?? existing.name,
+                permissionOverwrites: overwrites,
+            };
+
+            // Resoudre le categoryId de maniere intelligente (gere les placeholders de l'IA)
+            if (chData.categoryId !== undefined) {
+                const resolvedParentId = resolveCategoryId(chData.categoryId, guild, newCategoryMap);
+                if (resolvedParentId !== undefined) {
+                    opts.parent = resolvedParentId || null;
+                } else {
+                    report.skipped.push(`Salon "${chData.name}": categoryId "${chData.categoryId}" non resolu, parent inchange`);
+                }
+            }
+            if (metadata.supportsTopic && chData.topic !== undefined) opts.topic = chData.topic;
+            if (metadata.supportsNSFW && chData.nsfw !== undefined) opts.nsfw = chData.nsfw;
+            if (metadata.supportsSlowmode && chData.rateLimitPerUser !== undefined) opts.rateLimitPerUser = chData.rateLimitPerUser;
+            if (type === ChannelType.GuildVoice || type === ChannelType.GuildStageVoice) {
+                if (chData.bitrate) opts.bitrate = chData.bitrate;
+                if (chData.userLimit !== undefined) opts.userLimit = chData.userLimit;
+            }
+
+            await existing.edit(opts);
+            report.updated.push(`Channel: ${chData.name}`);
+            await sleep(OP_DELAY_MS);
+        } catch (err) {
+            report.errors.push(`Modification salon "${chData.name || chData.id}": ${err.message}`);
+        }
+    }
+
+    // ── Phase 9 : Supprimer les categories ────────────────────
+    await notif('Phase 9 - Suppression des categories...');
+    for (const catRef of diff.delete?.categories || []) {
+        if (catRef.id === commandChannelId) {
+            report.skipped.push(`Category "${catRef.name}" conservee (salon de commande)`);
             continue;
         }
         try {
-            await ch.delete('Blueprint Ollama - Nettoyage');
-            report.deleted.push(`Channel: ${ch.name}`);
+            const existing = catRef.id
+                ? guild.channels.cache.get(catRef.id)
+                : guild.channels.cache.find(ch => ch.type === ChannelType.GuildCategory && ch.name === catRef.name);
+            if (!existing) { report.skipped.push(`Category a supprimer introuvable: "${catRef.name}"`); continue; }
+            await existing.delete('Blueprint Diff - delete');
+            report.deleted.push(`Category: ${existing.name}`);
             await sleep(OP_DELAY_MS);
         } catch (err) {
-            report.errors.push(`Suppression channel "${ch.name}": ${err.message}`);
+            report.errors.push(`Suppression category "${catRef.name}": ${err.message}`);
         }
     }
 
-    // Delete unused roles
-    const processedRoleIds = new Set(roleNameToId.values());
-    const rolesToDelete = guild.roles.cache.filter(r => !processedRoleIds.has(r.id) && !r.managed && r.id !== guild.id);
-    for (const [id, r] of rolesToDelete) {
+    // ── Phase 10 : Supprimer les salons ───────────────────────
+    await notif('Phase 10 - Suppression des salons...');
+    for (const chRef of diff.delete?.channels || []) {
+        if (chRef.id === commandChannelId) {
+            report.skipped.push(`Salon "${chRef.name}" conserve (salon de commande, a supprimer manuellement)`);
+            continue;
+        }
         try {
-            await r.delete('Blueprint Ollama - Nettoyage');
-            report.deleted.push(`Role: ${r.name}`);
+            const existing = chRef.id
+                ? guild.channels.cache.get(chRef.id)
+                : guild.channels.cache.find(ch => ch.name === chRef.name);
+            if (!existing) { report.skipped.push(`Salon a supprimer introuvable: "${chRef.name}"`); continue; }
+            await existing.delete('Blueprint Diff - delete');
+            report.deleted.push(`Channel: ${existing.name}`);
             await sleep(OP_DELAY_MS);
         } catch (err) {
-            report.errors.push(`Suppression role "${r.name}": ${err.message}`);
+            report.errors.push(`Suppression salon "${chRef.name}": ${err.message}`);
         }
     }
 
@@ -386,26 +453,30 @@ async function applyBlueprint(guild, blueprint, commandChannelId, onProgress) {
     return report;
 }
 
+// ─────────────────────────────────────────────────────────────────
+//  FORMATAGE DU RAPPORT
+// ─────────────────────────────────────────────────────────────────
+
 function formatReport(report) {
     const lines = [];
     if (report.created.length > 0) {
         lines.push(`**Crees (${report.created.length}):**`);
-        lines.push(...report.created.slice(0, 15).map(l => `  + ${l}`));
-        if (report.created.length > 15) lines.push(`  *... et ${report.created.length - 15} de plus*`);
+        lines.push(...report.created.slice(0, 20).map(l => `  + ${l}`));
+        if (report.created.length > 20) lines.push(`  *... et ${report.created.length - 20} de plus*`);
     }
     if (report.updated.length > 0) {
         lines.push(`**Mis a jour (${report.updated.length}):**`);
-        lines.push(...report.updated.slice(0, 15).map(l => `  ~ ${l}`));
-        if (report.updated.length > 15) lines.push(`  *... et ${report.updated.length - 15} de plus*`);
+        lines.push(...report.updated.slice(0, 20).map(l => `  ~ ${l}`));
+        if (report.updated.length > 20) lines.push(`  *... et ${report.updated.length - 20} de plus*`);
+    }
+    if (report.deleted.length > 0) {
+        lines.push(`**Supprimes (${report.deleted.length}):**`);
+        lines.push(...report.deleted.slice(0, 20).map(l => `  - ${l}`));
+        if (report.deleted.length > 20) lines.push(`  *... et ${report.deleted.length - 20} de plus*`);
     }
     if (report.skipped.length > 0) {
-        lines.push(`**Ignores (${report.skipped.length}):**`);
-        lines.push(...report.skipped.slice(0, 5).map(l => `  ! ${l}`));
-    }
-    if (report.deleted && report.deleted.length > 0) {
-        lines.push(`**Supprimes (${report.deleted.length}):**`);
-        lines.push(...report.deleted.slice(0, 15).map(l => `  - ${l}`));
-        if (report.deleted.length > 15) lines.push(`  *... et ${report.deleted.length - 15} de plus*`);
+        lines.push(`**Ignores / Conserves (${report.skipped.length}):**`);
+        lines.push(...report.skipped.slice(0, 8).map(l => `  ! ${l}`));
     }
     if (report.errors.length > 0) {
         lines.push(`**Erreurs (${report.errors.length}):**`);
